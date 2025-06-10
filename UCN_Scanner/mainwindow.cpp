@@ -1,0 +1,458 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <iostream>
+#include <QMessageBox>
+#include <string>
+#include <QtDebug>
+#include <QByteArray>
+#include <unistd.h>
+#include <QtMath>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    init_port();
+
+    ui->xPosEdit->setText("0.000");
+    currentX  = 0;
+    ui->yPosEdit->setText("0.000");
+    currentY = 0;
+
+    ui->sampleSpacing->setText("5");
+    ui->sampleTime->setText("10");
+    ui->runTimeEnd->setText("00:00");
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+    port->close(); // Close  arduino serial port on exit
+}
+
+//**********************
+//Begin Josh's additions
+//**********************
+
+//***Command value table***//
+//Base state / no move == 0//
+//X Back == 1; Y Back == 2 //
+//X For == 3; Y For == 4   //
+//Run Scan == 5; Stop == 6 //
+//Update Position == 7;    //
+//Return Home == 8;        //
+//Total length = 59cm//
+//Total width = 28cm  //
+//*************************//
+
+void MainWindow::init_port()
+{
+    // Create port
+    port = new QextSerialPort("/dev/ttyACM0");
+
+    // Open port
+    port->open(QIODevice::ReadWrite | QIODevice::Unbuffered);
+    if(!port->isOpen())
+    {
+        QMessageBox::warning(this, "PORT ERROR", "Arduino port could not be opened!");
+    }
+
+    // Set port configuration
+    port->setBaudRate(BAUD9600);
+    port->setFlowControl(FLOW_OFF);
+    port->setParity(PAR_NONE);
+    port->setDataBits(DATA_8);
+    port->setStopBits(STOP_1);
+}
+
+void MainWindow::transmitVal(char cmd, float val1, float val2)
+{
+    size_t maxChar = 5;
+
+    std::string valStr = std::to_string(val1);
+    std::string valStr2 = std::to_string(val2);
+    int maxLength = (valStr.length() < maxChar)?valStr.length():maxChar;
+    valStr = valStr.substr(0, maxLength);
+    maxLength = (valStr2.length() < maxChar)?valStr2.length():maxChar;
+    valStr2 = valStr2.substr(0, maxLength);
+
+    //QString str1 = QString::fromStdString(valStr.c_str());
+    //QString str2 = QString::fromStdString(valStr2.c_str());
+    //qDebug() << str1;
+    //qDebug() << str2;
+
+    int strLen = valStr.length();
+    int strLen2 = valStr2.length();
+    char tempBuf[strLen + 1]; // temp buff for str to char array
+    char tempBuf2[strLen2 + 1];
+    char buffer[15] = {}; // buffer to hold up to 15 char (start, end, 2 comma, and 11 data char)
+    size_t i = 0;
+
+    strcpy(tempBuf, valStr.c_str());
+    strcpy(tempBuf2, valStr2.c_str());
+    buffer[0] = '<';
+    buffer[1] = cmd;
+    buffer[2] = ',';
+
+    for (i = 0; i < (sizeof(tempBuf) / sizeof(tempBuf[0])); i++)
+    {
+        buffer[i + 3] = tempBuf[i];
+    }
+    buffer[strLen + 3] = ',';
+
+    for (i = 0; i < (sizeof(tempBuf2) / sizeof(tempBuf2[0])); i++)
+    {
+        buffer[i + strLen + 4] = tempBuf2[i];
+    }
+    buffer[strLen + strLen2 + 4] = '>';
+
+    if (port->isOpen())
+    {
+        port->write(buffer);
+    }
+    else
+    {
+        QMessageBox::warning(this, "PORT ERROR", "Arduino port is not open!");
+    }
+}
+
+void MainWindow::updatePosDisplay()
+{
+    double xInCm = 0;
+    double yInCm = 0;
+
+    xInCm = (currentX / usteps) / (71.0 + (15.0 / 32.0));
+    yInCm = (currentY / usteps) / (71.0 + (5.0 / 32.0));
+
+    QString newX = QString::number(xInCm, 'f', 3);
+    ui->xPosEdit->setText(newX);
+
+    QString newY = QString::number(yInCm, 'f', 3);
+    ui->yPosEdit->setText(newY);
+
+    ui->posUpdate->setEnabled(true);
+    ui->returnHome->setEnabled(true);
+    ui->runScan->setEnabled(true);
+    ui->stopRun->setEnabled(true);
+}
+
+double MainWindow::calcTime()
+{
+    float spacing = 0.0;
+    float timing = 0.0;
+    double timeOut = 0.0;
+    double timeIn = 0.0;
+    double timeUp = 0.0;
+    double totalTime = 0.0; // total time for scan in minutes (min)
+    double minPerRot = 0.0;
+    double sec2min = 0.0;
+    double cmToStepsWid = 0.0;
+    double cmToStepsLen = 0.0;
+    double lengthUSteps = 0.0;
+    double widthUSteps = 0.0;
+
+    QString sampleTiming = ui->sampleTime->text();
+    timing = sampleTiming.toDouble();
+    sec2min = timing / 60.0;
+
+    QString sampleSpace = ui->sampleSpacing->text();
+    spacing = sampleSpace.toDouble();
+    cmToStepsWid = spacing * (71.0 + (5.0 / 32.0));
+    cmToStepsLen = spacing * (71.0 + (15.0 / 32.0));
+    lengthUSteps = cmToStepsLen * usteps;
+    widthUSteps = cmToStepsWid * usteps;
+
+    minPerRot = 1.0 / RPM;
+
+    timeOut = ((qFloor((MAX_STEPS_WIDTH * usteps) / widthUSteps) + 1) * sec2min)
+        + ((minPerRot * (widthUSteps / (200 * usteps))) * qFloor((MAX_STEPS_WIDTH * usteps) / widthUSteps));
+
+    timeIn = (((qFloor(((MAX_STEPS_WIDTH * usteps) / widthUSteps)) * widthUSteps) / (200 * usteps)) * minPerRot);
+
+    timeUp = (((MAX_STEPS_LENGTH * usteps) / lengthUSteps) * (lengthUSteps / (200 * usteps)) * minPerRot);
+
+    totalTime = (timeOut + timeIn) * (((MAX_STEPS_LENGTH * usteps) / lengthUSteps) + 1) + timeUp;
+
+    return totalTime;
+}
+
+void MainWindow::on_runScan_clicked()
+{
+    ui->posUpdate->setEnabled(true);
+    ui->returnHome->setEnabled(true);
+    ui->runScan->setEnabled(false);
+    ui->stopRun->setEnabled(true);
+    float spacing;
+    float timing;
+    double runTime = 0.0;
+    double curHour = 0.0;
+    double curMin = 0.0;
+    double curSec = 0.0;
+    double decTime = 0.0;
+    double newTime = 0.0;
+    int newHour = 0;
+    int newMin = 0;
+
+    command = '5';
+    QByteArray stopCmd = {};
+    breakFlag = false;
+
+    QString sampleSpace = ui->sampleSpacing->text();
+    spacing = sampleSpace.toDouble();
+
+    QString sampleTiming = ui->sampleTime->text();
+    timing = sampleTiming.toDouble();
+
+    runTime = calcTime();
+    QTime time = QTime::currentTime();
+    curHour = time.hour();
+    curMin = time.minute();
+    curSec = time.second();
+    decTime = (curHour * 60.0) + curMin + (curSec / 60.0);
+
+    newTime = decTime + runTime;
+    newHour = newTime / 60;
+    newMin = ((newTime / 60.0) - newHour) * 60;
+    //qDebug() << newHour;
+    //qDebug() << newMin;
+
+    std::string hour = std::to_string(newHour);
+    std::string min = std::to_string(newMin);
+    std::string timeNew = hour + ":" + min;
+    QString qtime = QString::fromStdString(timeNew);
+
+    ui->runTimeEnd->setText(qtime);
+
+    if ((currentX == 0) & (currentY == 0))
+    {
+        if (spacing > 28.000)
+        {
+            QMessageBox::warning(this, "Error Scanning", "Sample spacing must be less than 28.000 cm");
+        }
+        else
+        {
+            transmitVal(command, spacing, timing);
+
+            ui->xPosEdit->setText("0.000");
+            ui->yPosEdit->setText("0.000");
+            currentX = 0;
+            currentY = 0;
+
+
+            while((stopCmd[0] != '9') & (breakFlag == false))
+            {
+
+                QCoreApplication::processEvents();
+                if (port->isOpen())
+                {
+                    stopCmd = port->readAll();
+                }
+                qDebug() << stopCmd;
+            }
+            ui->runScan->setEnabled(true);
+            ui->runTimeEnd->setText("00:00");
+        }
+    }
+    else
+    {
+        QMessageBox::warning(this, "Error Scanning", "You must start at home (0,0)!!");
+    }
+
+}
+
+void MainWindow::on_posUpdate_clicked()
+{
+    ui->returnHome->setEnabled(true);
+    ui->runScan->setEnabled(true);
+    ui->stopRun->setEnabled(true);
+
+    double xPosDesire;
+    double yPosDesire;
+    command = '7';
+
+    QString xPosString = ui->xPosEdit->text();
+    QString yPosString = ui->yPosEdit->text();
+    xPosDesire = xPosString.toDouble();
+    yPosDesire = yPosString.toDouble();
+    if ((xPosDesire >= 0) & (yPosDesire >= 0))
+    {
+        if ((xPosDesire > 59.000) | (yPosDesire > 28.000))
+        {
+            QMessageBox::warning(this, "Position Update Error", "New position must be less than 59.000 cm for X and 28.000 cm for Y!");
+        }
+        else
+        {
+            transmitVal(command, xPosDesire, yPosDesire);
+
+            currentX = xPosDesire * (71.0 + (15.0 / 32.0)) * usteps;
+            currentY = yPosDesire * (71.0 + (5.0 / 32.0)) * usteps;
+            qDebug("%f usteps", currentX);
+            qDebug("%f usteps", currentY);
+        }
+    }
+    else
+    {
+         QMessageBox::warning(this, "Position Update Error", "New position must be greater than or equal to (0,0)!!");
+    }
+
+}
+
+void MainWindow::on_returnHome_clicked()
+{
+    ui->posUpdate->setEnabled(true);
+    ui->returnHome->setEnabled(false);
+    ui->runScan->setEnabled(true);
+    ui->stopRun->setEnabled(false);
+    command = '8';
+
+    transmitVal(command, 0, 0);
+    ui->xPosEdit->setText("0.000");
+    ui->yPosEdit->setText("0.000");
+    currentX = 0.0;
+    currentY = 0.0;
+}
+
+void MainWindow::on_stopRun_clicked()
+{
+    breakFlag = true;
+
+    ui->posUpdate->setEnabled(true);
+    ui->returnHome->setEnabled(true);
+    ui->runScan->setEnabled(true);
+    ui->stopRun->setEnabled(false);
+
+    command = '6';
+
+    ui->runTimeEnd->setText("00:00");
+    transmitVal(command, 0, 0);
+    QByteArray data = {0};
+    QByteArray stopCmd = {0};
+
+    int ndx = 0;
+    int i = 0;
+    char curXArray[15] = {'0'};
+    char curYArray[15] = {'0'};
+
+    if (port->isOpen())
+    {
+        usleep(30000);//1000000 is second
+        stopCmd = port->readAll();
+    }
+
+    //qDebug() << stopCmd;
+
+    if (stopCmd[0] == '9')
+    {
+        //on_stopButton_clicked();
+    }
+    else if (stopCmd[0] == '0')
+    {
+        // data acq was never started (this was not a run scan stop)
+    }
+    else
+    {
+        std::cout << "Stop command not receive. Data aqcuisition continues." << std::endl;
+    }
+
+    if (port->isOpen()) // read pos update
+    {
+        usleep(1200000); //1.2 sec
+        data = port->readAll();
+    }
+    qDebug() << data;
+
+    while (data[ndx] != '>')
+    {
+        curXArray[i] = data[ndx + 1];
+        ndx++;
+        i++;
+    }
+    curXArray[i - 1] = '\0';
+    ndx++;
+    i = 0;
+
+    while (data[ndx] != '>')
+    {
+        curYArray[i] = data[ndx + 1];
+        ndx++;
+        i++;
+    }
+    curYArray[i - 1] = '\0';
+
+    currentX = atof(curXArray);
+    currentY = atof(curYArray);
+
+    qDebug("%f usteps", currentX);
+    qDebug("%f usteps", currentY);
+    updatePosDisplay();
+
+}
+
+void MainWindow::on_xBack_clicked()
+{
+
+    command = '1';
+    if (currentX > 0)
+    {
+        transmitVal(command, 0, 0);
+
+        currentX = currentX - usteps;
+        updatePosDisplay();
+    }
+    else
+    {
+        QMessageBox::warning(this, "Take Step Error", "At min position, can't step back!");
+    }
+}
+
+void MainWindow::on_yBack_clicked()
+{
+
+    command = '2';
+    if (currentY > 0)
+    {
+        transmitVal(command, 0, 0);
+
+        currentY = currentY - usteps;
+        updatePosDisplay();
+    }
+    else
+    {
+        QMessageBox::warning(this, "Take Step Error", "At min position, can't step back!");
+    }
+}
+
+void MainWindow::on_xFor_clicked()
+{
+
+    command = '3';
+    if (currentX < (4214.8215 * usteps))
+    {
+        transmitVal(command, 0, 0);
+
+        currentX = currentX + usteps;
+        updatePosDisplay();
+    }
+    else
+    {
+        QMessageBox::warning(this, "Take Step Error", "At max position, can't step forward!");
+    }
+}
+
+void MainWindow::on_yFor_clicked()
+{
+
+    command = '4';
+    if (currentY < (1992.375 * usteps))
+    {
+        transmitVal(command, 0 , 0);
+
+        currentY = currentY + usteps;
+        updatePosDisplay();
+    }
+    else
+    {
+         QMessageBox::warning(this, "Take Step Error", "At max position, can't step forward!");
+    }
+}
